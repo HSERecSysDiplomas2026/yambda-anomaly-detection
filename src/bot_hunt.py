@@ -15,12 +15,15 @@ import numpy as np
 import polars as pl
 
 DATA = Path(__file__).resolve().parent.parent / "data"
+if not (DATA / "listens.parquet").exists():
+    raise SystemExit("Нет данных в data/. Сначала запустите: python src/download_data.py")
 
 MIN_LISTENS = 200        # пользователей с меньшим числом прослушиваний не рассматриваем
 SESSION_GAP = 30 * 60    # пауза больше 30 минут = начало новой сессии
 TOP = 10                 # сколько крайних пользователей показывать по каждому признаку
 Z_FLAG = 5               # с какого робастного z-score признак считается «сильно выбивающимся»
 
+# настройки вывода таблиц в отчет, чтобы ничего не обрезалось
 pl.Config.set_tbl_rows(40)
 pl.Config.set_tbl_cols(20)
 pl.Config.set_tbl_width_chars(200)
@@ -48,6 +51,7 @@ listens = (
     pl.read_parquet(DATA / "listens.parquet")
     .with_columns(pl.col("timestamp").cast(pl.Int64))
     .sort(["uid", "timestamp"])
+    # новые колонки
     .with_columns(
         (pl.col("track_length_seconds") * pl.col("played_ratio_pct") / 100).alias("played_sec"),
         ((pl.col("timestamp") % 86400) // 3600).alias("hour"),
@@ -55,13 +59,15 @@ listens = (
         pl.col("timestamp").diff().over("uid").alias("gap"),
     )
     .with_columns(
+        # номер сессии: 1 там, где начинается новая сессия (первое событие или пауза > 30 мин),
+        # накопленная сумма дает всем событиям одной сессии одинаковый номер
         (pl.col("gap").is_null() | (pl.col("gap") > SESSION_GAP))
         .cast(pl.Int32).cum_sum().over("uid").alias("session"),
+        # номер серии: так же, но новая серия начинается, когда сменился трек
         (pl.col("item_id") != pl.col("item_id").shift(1).over("uid"))
         .fill_null(True).cast(pl.Int32).cum_sum().over("uid").alias("run"),
     )
 )
-
 active = (
     listens.group_by("uid").len().rename({"len": "n_listens"})
     .filter(pl.col("n_listens") >= MIN_LISTENS)
